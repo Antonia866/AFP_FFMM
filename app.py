@@ -58,25 +58,35 @@ with st.sidebar:
     file_path = st.text_input("O ruta local", value="")
     run = st.button("Cargar y ejecutar", type="primary")
 
-if not run and uploaded is None and not file_path.strip():
-    st.info("👈 Sube el Excel en el sidebar o pega una ruta local, luego presiona **Cargar y ejecutar**.")
-    st.stop()
+# Mantener el archivo entre reruns usando session_state
+if "xls_loaded" not in st.session_state:
+    st.session_state["xls_loaded"] = None
 
-xls_source = None
-if uploaded is not None:
-    xls_source = uploaded
-elif file_path.strip():
-    xls_source = file_path.strip()
-else:
-    st.error("Debes subir un archivo o pegar una ruta local.")
+# Si clickea el botón, guardar el source
+if run:
+    if uploaded is not None:
+        st.session_state["xls_loaded"] = uploaded
+    elif file_path.strip():
+        st.session_state["xls_loaded"] = file_path.strip()
+
+xls_source = st.session_state["xls_loaded"]
+
+if xls_source is None:
+    st.info("👈 Sube el Excel en el sidebar, luego presiona **Cargar y ejecutar**.")
     st.stop()
 
 @st.cache_data(show_spinner=False)
-def cached_build(xls_source):
-    return build_outputs(xls_source)
+def cached_build(_xls_source):
+    return build_outputs(_xls_source)
 
 with st.spinner("Procesando datos..."):
-    out = cached_build(xls_source)
+    try:
+        out = cached_build(xls_source)
+    except Exception as e:
+        st.error(f"Error al procesar el Excel: {e}")
+        import traceback
+        st.code(traceback.format_exc())
+        st.stop()
 
 df = out["df"]
 snap_last = out["snap_last"].copy()
@@ -139,10 +149,27 @@ with st.sidebar:
         div["abs_div"] = div["Divergencia_GAP"].abs()
         for _, r in div.nlargest(5, "abs_div").iterrows():
             st.markdown(f"- `{r['Ticker']}` AFP `{fmt_pct(r['GAP_AFP'])}` / FFMM `{fmt_pct(r['GAP_FFMM'])}`")
+
         st.markdown("**⚡ Liderazgo del mes:**")
-        lid_counts = snap_last["Liderazgo_del_mes"].value_counts()
-        for lid, cnt in lid_counts.head(4).items():
-            st.markdown(f"- `{lid}`: {cnt}")
+        LID_LABELS = {
+            "Consenso_Compra": "🟢 Consenso compra",
+            "Consenso_Venta": "🔴 Consenso venta",
+            "Lidera_AFP": "🏎️ AFP lidera",
+            "Lidera_FFMM": "🏎️ FFMM lidera",
+            "Divergencia_Flujos": "⚔️ Divergencia",
+        }
+        for lid_key, lid_name in LID_LABELS.items():
+            tickers_lid = snap_last[snap_last["Liderazgo_del_mes"] == lid_key]["Ticker"].tolist()
+            if len(tickers_lid) == 0:
+                continue
+            st.markdown(f"**{lid_name}** ({len(tickers_lid)}):")
+            # Mostrar hasta 8 tickers, si hay más agregar "...+N"
+            to_show = tickers_lid[:8]
+            extra = len(tickers_lid) - len(to_show)
+            line = ", ".join([f"`{t}`" for t in to_show])
+            if extra > 0:
+                line += f" +{extra}"
+            st.markdown(line)
 
     st.markdown("---")
     # Export Excel
@@ -216,8 +243,13 @@ panorama_show = panorama[[
 })
 
 # Render con barras embebidas tipo research
-max_abs_afp = max(panorama_show["Diff AFP (bps)"].abs().max(), 1)
-max_abs_ffmm = max(panorama_show["Diff FFMM (bps)"].abs().max(), 1)
+# Cast explícito a int() puro de Python para evitar TypeError en json.dumps
+max_abs_afp = int(max(panorama_show["Diff AFP (bps)"].abs().max(), 1))
+max_abs_ffmm = int(max(panorama_show["Diff FFMM (bps)"].abs().max(), 1))
+
+# Asegurar que Diff también sean int puros
+panorama_show["Diff AFP (bps)"] = panorama_show["Diff AFP (bps)"].astype(int)
+panorama_show["Diff FFMM (bps)"] = panorama_show["Diff FFMM (bps)"].astype(int)
 
 st.dataframe(
     panorama_show,
@@ -242,10 +274,7 @@ st.dataframe(
         ),
     }
 )
-# Nota: los valores de Peso están en escala 0-1, pero con format "%.1f%%" Streamlit los multiplica por 100.
-# Ajuste: pasar a escala %
-for c in ["IPSA Weight", "Pension Fund", "Mutual Fund"]:
-    panorama_show[c] = panorama_show[c] * 100
+# Los pesos están en escala 0-1 decimal; Streamlit con "%.1f%%" ya los renderiza como %.
 
 st.caption("📌 Panorama ejecutivo: diferencia absoluta AFP vs IPSA y FFMM vs IPSA en **bps**, ordenado por peso IPSA descendente. Barras verdes = sobreponderado, rojas = infraponderado.")
 
@@ -267,6 +296,24 @@ tabs = st.tabs([
     "🏢 Sectorial",
     "🔄 Persistencia"
 ])
+
+
+# ------------------------------------------------------------
+# Error boundary por tab: si una tab falla no rompe las demás
+# ------------------------------------------------------------
+from contextlib import contextmanager
+
+@contextmanager
+def safe_tab(tab_ctx, tab_name):
+    """Envuelve el contenido de una tab para que un error no tumbe el app entero."""
+    with tab_ctx:
+        try:
+            yield
+        except Exception as e:
+            st.error(f"❌ Error en tab **{tab_name}**: {e}")
+            import traceback
+            with st.expander("Ver traceback completo"):
+                st.code(traceback.format_exc())
 
 
 # ------------------------------------------------------------
@@ -292,7 +339,7 @@ def cols_u(suffix):
 # ============================================================
 # TAB 1 — Posicionamiento vs historia
 # ============================================================
-with tabs[0]:
+with safe_tab(tabs[0], "Posicionamiento vs historia"):
     st.subheader("Posicionamiento actual vs promedio histórico")
 
     def _render_pos_hist(suffix):
@@ -383,22 +430,24 @@ with tabs[0]:
 # ============================================================
 # TAB 2 — Snapshot
 # ============================================================
-with tabs[1]:
+with safe_tab(tabs[1], "Snapshot"):
     st.subheader(f"Snapshot — {last_date.date()}")
 
     def _snap_table(suffix):
         c = cols_u(suffix)
         peso_col = f"Peso_{suffix}"
         d = snap_last.copy()
-        # Sparkline
+        # Sparkline (filtrar NaN porque LineChartColumn no los acepta)
         spark = {}
         for t in d["Ticker"].unique():
-            hist = dfh[(dfh["Ticker"] == t)].sort_values("Fecha").tail(12)[c["GAP"]].tolist()
-            spark[t] = hist
+            hist = dfh[(dfh["Ticker"] == t)].sort_values("Fecha").tail(12)[c["GAP"]].dropna().tolist()
+            spark[t] = [float(x) for x in hist] if hist else [0.0]
         d["Sparkline"] = d["Ticker"].map(spark)
 
         # Persistencia formateada
-        d["Persist_str"] = d[c["Persist"]].apply(lambda v: f"{v:+d}M" if pd.notna(v) and v != 0 else "0M")
+        d["Persist_str"] = d[c["Persist"]].apply(
+            lambda v: f"{int(v):+d}M" if pd.notna(v) and v != 0 else "0M"
+        )
 
         d["rank"] = d[c["Senal"]].map(SIGNAL_RANK).fillna(99)
         d["abs_d"] = d[c["Delta"]].abs()
@@ -465,7 +514,7 @@ with tabs[1]:
 # ============================================================
 # TAB 3 — Ranking
 # ============================================================
-with tabs[2]:
+with safe_tab(tabs[2], "Ranking"):
     st.subheader(f"Ranking — {last_date.date()}")
 
     def _render_cards(d, suffix, kind):
@@ -548,7 +597,7 @@ with tabs[2]:
 # ============================================================
 # TAB 4 — Detalle por papel (siempre muestra ambos)
 # ============================================================
-with tabs[3]:
+with safe_tab(tabs[3], "Detalle por papel"):
     st.subheader("Detalle por papel — AFP y FFMM en paralelo")
     paper = st.selectbox("Ticker", sorted(dfh["Ticker"].unique()))
     sub = dfh[dfh["Ticker"] == paper].sort_values("Fecha")
@@ -635,7 +684,7 @@ with tabs[3]:
 # ============================================================
 # TAB 5 — Heatmap
 # ============================================================
-with tabs[4]:
+with safe_tab(tabs[4], "Heatmap"):
     st.subheader("Heatmap — últimos 24 meses")
     metric_choice = st.selectbox("Métrica", ["GAP", "ΔGAP", "GAP_Z6"])
 
@@ -673,7 +722,7 @@ with tabs[4]:
 # ============================================================
 # TAB 6 — Flujo mensual / 3M / 6M
 # ============================================================
-with tabs[5]:
+with safe_tab(tabs[5], "Flujo"):
     st.subheader("Flujos — mensual / acumulado")
     ventana = st.radio("Ventana", ["1M", "3M", "6M"], horizontal=True)
     top_n = st.slider("Top N", 5, 30, 12)
@@ -713,7 +762,7 @@ with tabs[5]:
 # ============================================================
 # TAB 7 — Breadth (siempre ambos)
 # ============================================================
-with tabs[6]:
+with safe_tab(tabs[6], "Breadth"):
     st.subheader("Breadth AFP y FFMM")
     br = dfh.groupby("Fecha").agg(
         pct_buy_afp=("Delta_GAP_AFP", lambda s: (s > 0).mean()),
@@ -751,7 +800,7 @@ with tabs[6]:
 # ============================================================
 # TAB 8 — Scatter AFP vs FFMM (siempre ambos)
 # ============================================================
-with tabs[7]:
+with safe_tab(tabs[7], "Scatter AFP vs FFMM"):
     st.subheader("🎯 Scatter AFP vs FFMM")
     snap = snap_last.copy()
     snap = snap.dropna(subset=["GAP_AFP", "GAP_FFMM"])
@@ -802,7 +851,7 @@ with tabs[7]:
 # ============================================================
 # TAB 9 — Liderazgo (siempre ambos)
 # ============================================================
-with tabs[8]:
+with safe_tab(tabs[8], "Liderazgo"):
     st.subheader("⚡ Liderazgo AFP vs FFMM")
 
     lid_tbl = snap_last[["Ticker", "Sector", "Corr_6M", "Lead_Lag", "Liderazgo_del_mes",
@@ -811,7 +860,7 @@ with tabs[8]:
     st.dataframe(lid_tbl, use_container_width=True, hide_index=True,
                  column_config={
                      "Corr_6M": st.column_config.NumberColumn(format="%.2f"),
-                     "Lead_Lag": st.column_config.NumberColumn(format="%d"),
+                     "Lead_Lag": st.column_config.NumberColumn(format="%.0f"),
                      "Divergencia_GAP": st.column_config.NumberColumn(format="%.2f%%"),
                      "Divergencia_Z6": st.column_config.NumberColumn(format="%.2f"),
                  })
@@ -836,7 +885,7 @@ with tabs[8]:
 # ============================================================
 # TAB 10 — Sectorial
 # ============================================================
-with tabs[9]:
+with safe_tab(tabs[9], "Sectorial"):
     st.subheader("🏢 Vista sectorial")
 
     def _render_sectorial(suffix):
@@ -886,7 +935,7 @@ with tabs[9]:
 # ============================================================
 # TAB 11 — Persistencia
 # ============================================================
-with tabs[10]:
+with safe_tab(tabs[10], "Persistencia"):
     st.subheader("🔄 Persistencia de flujo")
 
     def _render_persist(suffix):
