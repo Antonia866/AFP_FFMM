@@ -340,63 +340,94 @@ def cols_u(suffix):
 # TAB 1 — Posicionamiento vs historia
 # ============================================================
 with safe_tab(tabs[0], "Posicionamiento vs historia"):
-    st.subheader("Posicionamiento actual vs promedio histórico")
+    st.subheader("GAP por papel vs promedio histórico")
+
+    # Selector de fecha
+    available_dates = sorted(dfh["Fecha"].dropna().unique())
+    default_idx = len(available_dates) - 1
+    if last_date in available_dates:
+        default_idx = available_dates.index(last_date)
+
+    sel_date = st.selectbox(
+        "Fecha a visualizar",
+        options=available_dates,
+        index=max(0, default_idx),
+        format_func=lambda x: pd.to_datetime(x).strftime("%Y-%m-%d"),
+        key="tab1_date"
+    )
 
     def _render_pos_hist(suffix):
         c = cols_u(suffix)
-        snap_date = dfh[dfh["Fecha"] == last_date][["Ticker", c["GAP"], c["Pos"], c["Z"]]].dropna()
+
+        # Snap para la fecha seleccionada
+        snap_date = dfh[dfh["Fecha"] == pd.to_datetime(sel_date)][
+            ["Ticker", c["GAP"], c["Z"]]
+        ].dropna(subset=[c["GAP"]])
         snap_date = snap_date.rename(columns={c["GAP"]: "GAP_Actual"})
-        hist_avg = dfh.groupby("Ticker", as_index=False)[c["GAP"]].mean().rename(columns={c["GAP"]: "GAP_Prom"})
+
+        # Promedio histórico (en el rango seleccionado, no toda la historia)
+        hist_avg = dfh.groupby("Ticker", as_index=False)[c["GAP"]].mean().rename(
+            columns={c["GAP"]: "GAP_Prom"}
+        )
+
         comp = snap_date.merge(hist_avg, on="Ticker", how="left")
         comp["Desvio"] = comp["GAP_Actual"] - comp["GAP_Prom"]
         comp = comp.sort_values("GAP_Actual", ascending=False)
 
+        if len(comp) == 0:
+            st.warning(f"No hay datos {suffix} para {sel_date}")
+            return
+
+        # Barras agrupadas: GAP_Actual (oscuro) vs GAP_Prom (claro)
+        fecha_str = pd.to_datetime(sel_date).strftime("%Y-%m-%d")
         fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=comp["GAP_Prom"],
+        fig.add_trace(go.Bar(
+            x=comp["Ticker"],
             y=comp["GAP_Actual"],
-            mode="markers+text",
-            text=comp["Ticker"],
-            textposition="top center",
-            marker=dict(
-                size=10,
-                color=comp[c["Z"]],
-                colorscale="RdYlGn",
-                cmid=0,
-                colorbar=dict(title="Z-score"),
-                line=dict(width=1, color="#333")
-            ),
-            hovertemplate="<b>%{text}</b><br>Actual: %{y:.2%}<br>Promedio: %{x:.2%}<extra></extra>"
+            name=f"GAP {fecha_str}",
+            marker_color="#1f4e8f",  # azul oscuro
+            hovertemplate="<b>%{x}</b><br>GAP actual: %{y:.2%}<extra></extra>",
+            customdata=comp["Desvio"]
         ))
-        # Diagonal
-        lo = min(comp["GAP_Prom"].min(), comp["GAP_Actual"].min())
-        hi = max(comp["GAP_Prom"].max(), comp["GAP_Actual"].max())
-        fig.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines",
-                                 line=dict(dash="dash", color="gray"), showlegend=False))
+        fig.add_trace(go.Bar(
+            x=comp["Ticker"],
+            y=comp["GAP_Prom"],
+            name="Promedio histórico",
+            marker_color="#8fb4d8",  # azul claro
+            hovertemplate="<b>%{x}</b><br>GAP promedio: %{y:.2%}<extra></extra>"
+        ))
+        fig.add_hline(y=0, line_width=1, line_color="black")
         fig.update_layout(
             template="plotly_white",
-            title=f"{suffix}: GAP actual vs promedio histórico",
-            xaxis_title="GAP Promedio (rango)",
-            yaxis_title="GAP Actual",
+            title=f"{suffix}: GAP por papel vs promedio histórico — {fecha_str}",
+            barmode="group",
             height=500,
-            xaxis_tickformat=".1%",
-            yaxis_tickformat=".1%"
+            yaxis_tickformat=".1%",
+            yaxis_title="GAP",
+            xaxis_title="",
+            xaxis_tickangle=-45,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            margin=dict(b=120)
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        # Z-score barras
+        # Z-score barras (se conserva - sigue siendo útil para detectar extremos)
         zs = comp[["Ticker", c["Z"]]].dropna().sort_values(c["Z"], ascending=True)
-        colors = ["#e74c3c" if v < -1.5 else "#f5b7b1" if v < 0 else "#a5e8c6" if v < 1.5 else "#27ae60"
-                  for v in zs[c["Z"]]]
-        fig2 = go.Figure(go.Bar(x=zs[c["Z"]], y=zs["Ticker"], orientation="h", marker_color=colors))
-        fig2.add_vline(x=1.5, line_dash="dash", line_color="gray")
-        fig2.add_vline(x=-1.5, line_dash="dash", line_color="gray")
-        fig2.add_vline(x=0, line_color="black")
-        fig2.update_layout(template="plotly_white",
-                           title=f"{suffix}: Z-score del GAP actual vs historia propia del ticker",
-                           height=max(400, 18 * len(zs)),
-                           xaxis_title="Z-score (±1.5 = extremo)")
-        st.plotly_chart(fig2, use_container_width=True)
+        if len(zs):
+            colors = ["#e74c3c" if v < -1.5 else "#f5b7b1" if v < 0
+                      else "#a5e8c6" if v < 1.5 else "#27ae60" for v in zs[c["Z"]]]
+            fig2 = go.Figure(go.Bar(x=zs[c["Z"]], y=zs["Ticker"],
+                                    orientation="h", marker_color=colors))
+            fig2.add_vline(x=1.5, line_dash="dash", line_color="gray")
+            fig2.add_vline(x=-1.5, line_dash="dash", line_color="gray")
+            fig2.add_vline(x=0, line_color="black")
+            fig2.update_layout(
+                template="plotly_white",
+                title=f"{suffix}: Z-score del GAP actual vs historia propia del ticker",
+                height=max(400, 18 * len(zs)),
+                xaxis_title="Z-score (±1.5 = extremo)"
+            )
+            st.plotly_chart(fig2, use_container_width=True)
 
     if universo == "AFP":
         _render_pos_hist("AFP")
@@ -416,7 +447,9 @@ with safe_tab(tabs[0], "Posicionamiento vs historia"):
         st.markdown("#### Serie histórica superpuesta")
         sub = dfh[dfh["Ticker"].isin(sel_tickers)]
         fig_l = go.Figure()
-        gap_cols_plot = ["GAP_AFP"] if universo == "AFP" else ["GAP_FFMM"] if universo == "FFMM" else ["GAP_AFP", "GAP_FFMM"]
+        gap_cols_plot = ["GAP_AFP"] if universo == "AFP" else \
+                        ["GAP_FFMM"] if universo == "FFMM" else \
+                        ["GAP_AFP", "GAP_FFMM"]
         for t in sel_tickers:
             subt = sub[sub["Ticker"] == t].sort_values("Fecha")
             for gc in gap_cols_plot:
