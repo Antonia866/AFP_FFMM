@@ -284,6 +284,7 @@ st.markdown("---")
 # TABS
 # ============================================================
 tabs = st.tabs([
+    "💰 Flujo Agregado",
     "📈 Posicionamiento vs historia",
     "✅ Snapshot",
     "🏁 Ranking",
@@ -337,9 +338,226 @@ def cols_u(suffix):
 
 
 # ============================================================
+# TAB 0 — 💰 Flujo Agregado (NEW)
+# ============================================================
+with safe_tab(tabs[0], "Flujo Agregado"):
+    st.subheader("💰 Flujo agregado al IPSA — AFP y FFMM")
+    st.caption(
+        "Vista macro: los fondos en su conjunto, ¿están aumentando o reduciendo exposición al IPSA? "
+        "Agrega los flujos de todos los tickers en uno solo."
+    )
+
+    # Construir serie agregada por universo
+    agg = dfh.groupby("Fecha").agg(
+        SumMMUSD_AFP=("MMUSD_AFP", "sum"),
+        SumMMUSD_FFMM=("MMUSD_FFMM", "sum"),
+    ).reset_index().sort_values("Fecha").reset_index(drop=True)
+
+    agg["DMMUSD_AFP"] = agg["SumMMUSD_AFP"].diff()
+    agg["DMMUSD_FFMM"] = agg["SumMMUSD_FFMM"].diff()
+
+    # Selector de vista
+    vista = st.radio(
+        "Vista",
+        options=["Stock total (MMUSD)", "Flujo mensual (ΔMMUSD)", "Flujo acumulado desde fecha base"],
+        index=1,
+        horizontal=True,
+        key="flujo_agg_vista",
+        help=(
+            "• **Stock total**: cuántos MMUSD tiene cada fondo invertido en el IPSA en cada mes.\n\n"
+            "• **Flujo mensual**: cambio mes a mes del stock. Mezcla flujo real + efecto precio del IPSA.\n\n"
+            "• **Flujo acumulado**: suma de flujos mensuales desde una fecha base — suaviza ruido y muestra tendencia."
+        )
+    )
+
+    # ===== Gráfico 1: Serie temporal =====
+    st.markdown("### Serie temporal")
+
+    if "Stock total" in vista:
+        col_afp, col_ffmm, y_title, fmt_y = "SumMMUSD_AFP", "SumMMUSD_FFMM", "Stock total (MMUSD)", ",.0f"
+        plot_df = agg.copy()
+    elif "Flujo mensual" in vista:
+        col_afp, col_ffmm, y_title, fmt_y = "DMMUSD_AFP", "DMMUSD_FFMM", "Flujo mensual (ΔMMUSD)", ",.0f"
+        plot_df = agg.dropna(subset=[col_afp, col_ffmm]).copy()
+    else:
+        # Acumulado desde fecha base
+        fechas_disp = agg["Fecha"].tolist()
+        default_idx_base = max(0, len(fechas_disp) - 25)  # ~24 meses atrás
+        base_date = st.selectbox(
+            "Fecha base (acumulado desde aquí)",
+            options=fechas_disp,
+            index=default_idx_base,
+            format_func=lambda x: pd.to_datetime(x).strftime("%Y-%m-%d"),
+            key="flujo_agg_base"
+        )
+        sub = agg[agg["Fecha"] >= pd.to_datetime(base_date)].copy()
+        sub["Acum_AFP"] = sub["DMMUSD_AFP"].fillna(0).cumsum()
+        sub["Acum_FFMM"] = sub["DMMUSD_FFMM"].fillna(0).cumsum()
+        col_afp, col_ffmm, y_title, fmt_y = "Acum_AFP", "Acum_FFMM", f"Flujo acumulado desde {pd.to_datetime(base_date).strftime('%Y-%m')} (MMUSD)", ",.0f"
+        plot_df = sub
+
+    # Construir figura
+    if "Flujo mensual" in vista:
+        # Barras para flujo mensual (más claro que líneas)
+        fig_ts = go.Figure()
+        colors_afp = ["#27ae60" if v > 0 else "#c0392b" for v in plot_df[col_afp]]
+        colors_ffmm = ["#2980b9" if v > 0 else "#8e44ad" for v in plot_df[col_ffmm]]
+        fig_ts.add_trace(go.Bar(
+            x=plot_df["Fecha"], y=plot_df[col_afp],
+            name="AFP", marker_color="#27ae60", opacity=0.85
+        ))
+        fig_ts.add_trace(go.Bar(
+            x=plot_df["Fecha"], y=plot_df[col_ffmm],
+            name="FFMM", marker_color="#3498db", opacity=0.85
+        ))
+        fig_ts.add_hline(y=0, line_color="black")
+        fig_ts.update_layout(barmode="group")
+    else:
+        # Líneas para stock y acumulado
+        fig_ts = go.Figure()
+        fig_ts.add_trace(go.Scatter(
+            x=plot_df["Fecha"], y=plot_df[col_afp], mode="lines+markers",
+            name="AFP", line=dict(color="#27ae60", width=2.5),
+            marker=dict(size=5),
+            fill="tozeroy" if "Acumulado" in y_title else None,
+            fillcolor="rgba(39, 174, 96, 0.1)" if "Acumulado" in y_title else None
+        ))
+        fig_ts.add_trace(go.Scatter(
+            x=plot_df["Fecha"], y=plot_df[col_ffmm], mode="lines+markers",
+            name="FFMM", line=dict(color="#3498db", width=2.5),
+            marker=dict(size=5),
+            fill="tozeroy" if "Acumulado" in y_title else None,
+            fillcolor="rgba(52, 152, 219, 0.1)" if "Acumulado" in y_title else None
+        ))
+        fig_ts.add_hline(y=0, line_dash="dash", line_color="gray")
+
+    fig_ts.update_layout(
+        template="plotly_white",
+        hovermode="x unified",
+        title=y_title,
+        yaxis_tickformat=fmt_y,
+        yaxis_title=y_title,
+        height=420,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    st.plotly_chart(fig_ts, use_container_width=True)
+
+    # Interpretación dinámica
+    last_d_afp = agg["DMMUSD_AFP"].iloc[-1] if pd.notna(agg["DMMUSD_AFP"].iloc[-1]) else 0
+    last_d_ffmm = agg["DMMUSD_FFMM"].iloc[-1] if pd.notna(agg["DMMUSD_FFMM"].iloc[-1]) else 0
+    direccion_afp = "entraron" if last_d_afp > 0 else "salieron"
+    direccion_ffmm = "entraron" if last_d_ffmm > 0 else "salieron"
+    st.info(
+        f"📌 **Último mes ({pd.to_datetime(last_date).strftime('%Y-%m')})**: "
+        f"**AFP {direccion_afp} {abs(last_d_afp):,.0f} MMUSD** del IPSA. "
+        f"**FFMM {direccion_ffmm} {abs(last_d_ffmm):,.0f} MMUSD**."
+    )
+
+    # ===== Tabla comparativa último mes + Δ =====
+    st.markdown("### Tabla comparativa")
+
+    last_i = len(agg) - 1
+
+    def _val_at(col, offset):
+        idx = last_i - offset
+        return agg[col].iloc[idx] if 0 <= idx < len(agg) else None
+
+    def _fmt_mm(v):
+        if v is None or pd.isna(v):
+            return "—"
+        return f"{v:,.0f}"
+
+    def _sum_last_n(col, n):
+        """Suma de últimos n meses de delta."""
+        if last_i - n + 1 < 0:
+            return None
+        s = agg[col].iloc[last_i - n + 1:last_i + 1].sum()
+        return s
+
+    rows = []
+    for label, col_stock, col_delta in [
+        ("AFP", "SumMMUSD_AFP", "DMMUSD_AFP"),
+        ("FFMM", "SumMMUSD_FFMM", "DMMUSD_FFMM"),
+    ]:
+        rows.append({
+            "Fondo": label,
+            "Stock actual (MMUSD)": _fmt_mm(_val_at(col_stock, 0)),
+            "Flujo 1M": _fmt_mm(_val_at(col_delta, 0)),
+            "Flujo 3M (suma)": _fmt_mm(_sum_last_n(col_delta, 3)),
+            "Flujo 6M (suma)": _fmt_mm(_sum_last_n(col_delta, 6)),
+            "Flujo 12M (suma)": _fmt_mm(_sum_last_n(col_delta, 12)),
+            "Prom mensual 12M": _fmt_mm(_sum_last_n(col_delta, 12) / 12 if _sum_last_n(col_delta, 12) is not None else None),
+        })
+    tabla_comp = pd.DataFrame(rows)
+    st.dataframe(tabla_comp, use_container_width=True, hide_index=True)
+
+    # ===== Gráfico 3: Barras acumuladas por año =====
+    st.markdown("### Flujo acumulado por año calendario")
+    st.caption("Suma del ΔMMUSD por año calendario. Útil para ver tendencias largas sin ruido mensual.")
+
+    agg_yr = agg.copy()
+    agg_yr["Año"] = agg_yr["Fecha"].dt.year
+    year_sums = agg_yr.groupby("Año").agg(
+        Flujo_AFP=("DMMUSD_AFP", "sum"),
+        Flujo_FFMM=("DMMUSD_FFMM", "sum")
+    ).reset_index()
+    # Excluir años con todo NaN/0 iniciales
+    year_sums = year_sums[(year_sums["Flujo_AFP"].abs() + year_sums["Flujo_FFMM"].abs()) > 0]
+
+    fig_yr = go.Figure()
+    fig_yr.add_trace(go.Bar(
+        x=year_sums["Año"], y=year_sums["Flujo_AFP"],
+        name="AFP", marker_color="#27ae60",
+        text=[f"{v:,.0f}" for v in year_sums["Flujo_AFP"]],
+        textposition="outside"
+    ))
+    fig_yr.add_trace(go.Bar(
+        x=year_sums["Año"], y=year_sums["Flujo_FFMM"],
+        name="FFMM", marker_color="#3498db",
+        text=[f"{v:,.0f}" for v in year_sums["Flujo_FFMM"]],
+        textposition="outside"
+    ))
+    fig_yr.add_hline(y=0, line_color="black")
+    fig_yr.update_layout(
+        template="plotly_white",
+        title="Flujo anual acumulado (ΔMMUSD sumado en el año)",
+        barmode="group",
+        height=400,
+        yaxis_title="ΔMMUSD anual",
+        xaxis_title="Año",
+        xaxis=dict(type="category"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    st.plotly_chart(fig_yr, use_container_width=True)
+
+    with st.expander("📘 Cómo leer esta tab"):
+        st.markdown("""
+**¿Qué responde esta vista?**
+
+La pregunta macro: **¿los fondos en su conjunto están entrando o saliendo del IPSA?**
+
+**Tres vistas:**
+
+1. **Stock total (MMUSD)**: cuántos MMUSD tiene invertido cada fondo en el IPSA en cada mes. Muestra el nivel absoluto.
+
+2. **Flujo mensual (ΔMMUSD)**: cambio de un mes al siguiente. Barras verdes = entraron dólares, rojas = salieron. Es la métrica más "de mesa" para ver dinámica.
+
+3. **Flujo acumulado desde fecha base**: suma de flujos mensuales desde una fecha que vos elegís. Suaviza el ruido y muestra si la tendencia larga es entrada o salida neta.
+
+**Advertencia sobre el ΔMMUSD**: mezcla flujo real (compras/ventas) con efecto precio (si el IPSA sube 5%, el MMUSD sube aunque no compren nada). Para separar flujo puro del efecto precio habría que tener retornos del IPSA — no están en el Excel.
+
+**Las dos líneas AFP vs FFMM superpuestas** permiten detectar si ambos fondos actúan igual (consenso) o divergen.
+
+**Ejemplo de lectura**:
+- Si AFP tiene +500 MMUSD este mes y FFMM tiene +200 → consenso de entrada al IPSA.
+- Si AFP tiene -800 MMUSD y FFMM tiene +100 → AFP rotando afuera, FFMM comprando (desacuerdo institucional).
+""")
+
+
+# ============================================================
 # TAB 1 — Posicionamiento vs historia
 # ============================================================
-with safe_tab(tabs[0], "Posicionamiento vs historia"):
+with safe_tab(tabs[1], "Posicionamiento vs historia"):
     st.subheader("GAP por papel vs promedio histórico")
 
     # Selector de fecha
@@ -463,7 +681,7 @@ with safe_tab(tabs[0], "Posicionamiento vs historia"):
 # ============================================================
 # TAB 2 — Snapshot
 # ============================================================
-with safe_tab(tabs[1], "Snapshot"):
+with safe_tab(tabs[2], "Snapshot"):
     st.subheader(f"Snapshot — {last_date.date()}")
 
     def _snap_table(suffix):
@@ -547,7 +765,7 @@ with safe_tab(tabs[1], "Snapshot"):
 # ============================================================
 # TAB 3 — Ranking
 # ============================================================
-with safe_tab(tabs[2], "Ranking"):
+with safe_tab(tabs[3], "Ranking"):
     st.subheader(f"Ranking — {last_date.date()}")
 
     def _render_cards(d, suffix, kind):
@@ -630,7 +848,7 @@ with safe_tab(tabs[2], "Ranking"):
 # ============================================================
 # TAB 4 — Detalle por papel (siempre muestra ambos)
 # ============================================================
-with safe_tab(tabs[3], "Detalle por papel"):
+with safe_tab(tabs[4], "Detalle por papel"):
     st.subheader("Detalle por papel — AFP y FFMM en paralelo")
     paper = st.selectbox("Ticker", sorted(dfh["Ticker"].unique()))
     sub = dfh[dfh["Ticker"] == paper].sort_values("Fecha")
@@ -717,7 +935,7 @@ with safe_tab(tabs[3], "Detalle por papel"):
 # ============================================================
 # TAB 5 — Heatmap
 # ============================================================
-with safe_tab(tabs[4], "Heatmap"):
+with safe_tab(tabs[5], "Heatmap"):
     st.subheader("Heatmap — últimos 24 meses")
     metric_choice = st.selectbox("Métrica", ["GAP", "ΔGAP", "GAP_Z6"])
 
@@ -755,7 +973,7 @@ with safe_tab(tabs[4], "Heatmap"):
 # ============================================================
 # TAB 6 — Flujo mensual / 3M / 6M
 # ============================================================
-with safe_tab(tabs[5], "Flujo"):
+with safe_tab(tabs[6], "Flujo"):
     st.subheader("Flujos — mensual / acumulado")
     ventana = st.radio("Ventana", ["1M", "3M", "6M"], horizontal=True)
     top_n = st.slider("Top N", 5, 30, 12)
@@ -795,7 +1013,7 @@ with safe_tab(tabs[5], "Flujo"):
 # ============================================================
 # TAB 7 — Breadth (siempre ambos)
 # ============================================================
-with safe_tab(tabs[6], "Breadth"):
+with safe_tab(tabs[7], "Breadth"):
     st.subheader("Breadth AFP y FFMM")
     br = dfh.groupby("Fecha").agg(
         pct_buy_afp=("Delta_GAP_AFP", lambda s: (s > 0).mean()),
@@ -833,7 +1051,7 @@ with safe_tab(tabs[6], "Breadth"):
 # ============================================================
 # TAB 8 — Scatter AFP vs FFMM (siempre ambos)
 # ============================================================
-with safe_tab(tabs[7], "Scatter AFP vs FFMM"):
+with safe_tab(tabs[8], "Scatter AFP vs FFMM"):
     st.subheader("🎯 Scatter AFP vs FFMM")
     snap = snap_last.copy()
     snap = snap.dropna(subset=["GAP_AFP", "GAP_FFMM"])
@@ -884,7 +1102,7 @@ with safe_tab(tabs[7], "Scatter AFP vs FFMM"):
 # ============================================================
 # TAB 9 — Liderazgo (siempre ambos)
 # ============================================================
-with safe_tab(tabs[8], "Liderazgo"):
+with safe_tab(tabs[9], "Liderazgo"):
     st.subheader("⚡ Liderazgo AFP vs FFMM")
 
     lid_tbl = snap_last[["Ticker", "Sector", "Corr_6M", "Lead_Lag", "Liderazgo_del_mes",
@@ -918,7 +1136,7 @@ with safe_tab(tabs[8], "Liderazgo"):
 # ============================================================
 # TAB 10 — Sectorial
 # ============================================================
-with safe_tab(tabs[9], "Sectorial"):
+with safe_tab(tabs[10], "Sectorial"):
     st.subheader("🏢 Vista sectorial")
 
     def _render_sectorial(suffix):
@@ -968,7 +1186,7 @@ with safe_tab(tabs[9], "Sectorial"):
 # ============================================================
 # TAB 11 — Persistencia
 # ============================================================
-with safe_tab(tabs[10], "Persistencia"):
+with safe_tab(tabs[11], "Persistencia"):
     st.subheader("🔄 Persistencia de flujo")
 
     def _render_persist(suffix):
