@@ -530,6 +530,136 @@ with safe_tab(tabs[0], "Flujo Agregado"):
     )
     st.plotly_chart(fig_yr, use_container_width=True)
 
+    # ===== Gráfico 4: Flujo anidado por ticker (6M / 3M / 1M) =====
+    st.markdown("### 🎯 Flujo acumulado por ticker — 6M / 3M / 1M")
+    st.caption(
+        "Para cada papel: barra ancha clara = acumulado 6 meses, barra angosta oscura = acumulado 3 meses, "
+        "diamante rojo = último mes. Permite ver el **ritmo del flujo**: si la barra 3M ocupa casi todo el 6M, "
+        "el movimiento se aceleró recientemente; si es chica, el flujo se está enfriando."
+    )
+
+    col_a, col_b = st.columns([1, 2])
+    with col_a:
+        metric_anidado = st.radio(
+            "Métrica",
+            options=["ΔGAP (rebalanceo vs IPSA)", "ΔMMUSD (flujo en dólares)"],
+            index=0,
+            key="anidado_metric"
+        )
+    with col_b:
+        top_n_anidado = st.slider("Top N tickers (por magnitud 6M)", 5, 30, 15, key="anidado_topn")
+
+    # Calcular las 3 ventanas por ticker
+    fechas_sorted = sorted(dfh["Fecha"].unique())
+
+    def _sum_window_by_ticker(suffix, months, use_mmusd=False):
+        """Suma de los últimos `months` periodos por ticker, para AFP o FFMM."""
+        if len(fechas_sorted) < months + 1:
+            return pd.Series(dtype=float)
+        fecha_inicio = fechas_sorted[-months - 1]  # excluye el periodo base
+        sub = dfh[dfh["Fecha"] > fecha_inicio].copy()
+        if use_mmusd:
+            # ΔMMUSD por ticker en la ventana = stock al final - stock al inicio
+            stock_end = sub[sub["Fecha"] == fechas_sorted[-1]].groupby("Ticker")[f"MMUSD_{suffix}"].sum()
+            stock_start_idx = max(0, len(fechas_sorted) - months - 1)
+            stock_start = dfh[dfh["Fecha"] == fechas_sorted[stock_start_idx]].groupby("Ticker")[f"MMUSD_{suffix}"].sum()
+            return (stock_end - stock_start).fillna(0)
+        else:
+            return sub.groupby("Ticker")[f"Delta_GAP_{suffix}"].sum()
+
+    def _render_anidado(suffix, color_fondo, color_oscuro):
+        use_mm = "MMUSD" in metric_anidado
+        f6 = _sum_window_by_ticker(suffix, 6, use_mm)
+        f3 = _sum_window_by_ticker(suffix, 3, use_mm)
+        f1 = _sum_window_by_ticker(suffix, 1, use_mm)
+
+        if len(f6) == 0:
+            st.warning(f"No hay datos suficientes para {suffix}")
+            return
+
+        comp = pd.DataFrame({"Flujo_6M": f6, "Flujo_3M": f3, "Flujo_1M": f1}).fillna(0).reset_index()
+        # Filtrar tickers con cero en todas las ventanas
+        comp = comp[(comp["Flujo_6M"].abs() + comp["Flujo_3M"].abs() + comp["Flujo_1M"].abs()) > 0]
+        comp["abs_6m"] = comp["Flujo_6M"].abs()
+        comp = comp.nlargest(top_n_anidado, "abs_6m").sort_values("Flujo_6M", ascending=True)
+
+        if len(comp) == 0:
+            st.warning(f"Sin movimientos significativos en {suffix}")
+            return
+
+        # Escala a bps si es ΔGAP, MMUSD nativo si no
+        if use_mm:
+            mult = 1.0
+            x_label = f"Flujo {suffix} acumulado (MMUSD)"
+            x_fmt = ",.0f"
+        else:
+            mult = 10000.0
+            x_label = f"Flujo {suffix} acumulado (bps de ΔGAP)"
+            x_fmt = ".0f"
+
+        # Color fondo con transparencia (rgba)
+        # Pasar hex a rgba con alpha 0.35
+        def hex_to_rgba(hex_color, alpha):
+            h = hex_color.lstrip("#")
+            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+            return f"rgba({r},{g},{b},{alpha})"
+
+        fig_a = go.Figure()
+        # Barra ancha 6M (fondo)
+        fig_a.add_trace(go.Bar(
+            y=comp["Ticker"], x=comp["Flujo_6M"] * mult,
+            name="Acum 6M",
+            marker_color=hex_to_rgba(color_oscuro, 0.30),
+            marker_line=dict(color=color_oscuro, width=1),
+            orientation="h", width=0.85,
+            hovertemplate="<b>%{y}</b><br>Acum 6M: %{x:" + x_fmt + "}<extra></extra>"
+        ))
+        # Barra angosta 3M (medio)
+        fig_a.add_trace(go.Bar(
+            y=comp["Ticker"], x=comp["Flujo_3M"] * mult,
+            name="Acum 3M",
+            marker_color=color_oscuro,
+            orientation="h", width=0.45,
+            hovertemplate="<b>%{y}</b><br>Acum 3M: %{x:" + x_fmt + "}<extra></extra>"
+        ))
+        # Diamantes 1M
+        fig_a.add_trace(go.Scatter(
+            y=comp["Ticker"], x=comp["Flujo_1M"] * mult,
+            mode="markers", name="Último mes",
+            marker=dict(size=13, color="#e74c3c", symbol="diamond",
+                        line=dict(width=1.5, color="white")),
+            hovertemplate="<b>%{y}</b><br>Último mes: %{x:" + x_fmt + "}<extra></extra>"
+        ))
+        fig_a.add_vline(x=0, line_color="black", line_width=0.8)
+        fig_a.update_layout(
+            template="plotly_white",
+            title=f"{suffix} — Flujo acumulado anidado (6M / 3M / 1M)",
+            barmode="overlay",
+            height=max(450, 28 * len(comp)),
+            xaxis_title=x_label,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig_a, use_container_width=True)
+
+    if universo == "AFP":
+        _render_anidado("AFP", "#5b8fd1", "#1f4e8f")
+    elif universo == "FFMM":
+        _render_anidado("FFMM", "#5dade2", "#1b4f72")
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("#### AFP")
+            _render_anidado("AFP", "#5b8fd1", "#1f4e8f")
+        with col2:
+            st.markdown("#### FFMM")
+            _render_anidado("FFMM", "#5dade2", "#1b4f72")
+
+    st.info(
+        "📌 **Cómo leer**: si la barra 3M (oscura) ocupa casi todo el 6M (claro) → el flujo se concentró en los últimos 3 meses (movimiento reciente). "
+        "Si la barra 3M es chica vs la 6M → el flujo viene desde antes y se enfrió. "
+        "Si el diamante 1M está en signo opuesto al 3M → cambio de tendencia este mes."
+    )
+
     with st.expander("📘 Cómo leer esta tab"):
         st.markdown("""
 **¿Qué responde esta vista?**
