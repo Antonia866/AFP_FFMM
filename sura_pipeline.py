@@ -87,9 +87,9 @@ def _parse_block(raw: pd.DataFrame, header_row: int, end_row: int) -> pd.DataFra
         return pd.DataFrame(columns=["Sector", "Ticker", "Fecha", "Valor"])
 
     data = data.dropna(subset=["Ticker"])
-    data["Ticker"] = data["Ticker"].astype(str).str.strip()
+    data["Ticker"] = data["Ticker"].astype(str).str.strip().str.upper()
     data = data[~data["Ticker"].isin(FNEST_EXCLUDE)]
-    data = data[data["Ticker"] != "Ticker"]  # filtra headers duplicados
+    data = data[data["Ticker"] != "TICKER"]  # filtra headers duplicados (case-insensitive)
 
     # Melt a long
     long = data.melt(id_vars=["Sector", "Ticker"], value_vars=date_cols,
@@ -107,6 +107,15 @@ def _parse_block(raw: pd.DataFrame, header_row: int, end_row: int) -> pd.DataFra
     long = long.drop(columns=["YM"])
     long["Valor"] = pd.to_numeric(long["Valor"], errors="coerce")
     long = long.dropna(subset=["Fecha"])
+
+    # Consolidar duplicados (mismo Ticker en varias filas del Excel — ej: MallPlaza/MALLPLAZA).
+    # Se suman los valores porque representan el mismo papel listado dos veces.
+    # Se conserva el primer Sector encontrado.
+    long = long.groupby(["Ticker", "Fecha"], as_index=False).agg(
+        Sector=("Sector", "first"),
+        Valor=("Valor", "sum"),
+    )
+
     return long[["Sector", "Ticker", "Fecha", "Valor"]]
 
 
