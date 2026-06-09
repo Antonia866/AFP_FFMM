@@ -535,25 +535,16 @@ with safe_tab(tabs[0], "Flujo Agregado"):
     st.caption(
         "Para cada papel, el flujo acumulado de 6 meses se descompone en **3 tramos no solapados que suman exactamente el total**: "
         "primeros 3 meses del semestre (meses -6 a -4), siguientes 2 meses (meses -3 a -2), y último mes (mes 0). "
-        "Si los 3 tramos van en el mismo sentido y son parejos → flujo sostenido. "
-        "Si tienen signos opuestos → cambio de tendencia. "
-        "Solo se usa ΔGAP (rebalanceo vs IPSA) porque es la métrica limpia — el ΔMMUSD mezcla flujo y efecto precio."
+        "Las cifras dentro de cada barra muestran los bps de cada tramo. "
+        "Al final aparece el **total 6M** y el **GAP actual** del papel (🟢 OW = sobreponderado / 🔴 UW = infraponderado)."
     )
-
-    top_n_anidado = st.slider("Top N tickers (por magnitud 6M)", 5, 30, 15, key="anidado_topn")
 
     fechas_sorted = sorted(dfh["Fecha"].unique())
 
     def _sum_tramo_by_ticker(suffix, start_offset, end_offset):
-        """
-        Suma de Delta_GAP por ticker en el tramo definido por [start_offset, end_offset]
-        donde offset = 0 es el último mes, -1 el anterior, etc.
-        Devuelve la suma de ΔGAP en ese tramo (sin solapamiento con otros tramos).
-        """
         n = len(fechas_sorted)
-        # Convertir offsets en índices absolutos
-        idx_end = n - 1 + end_offset       # inclusivo
-        idx_start = n - 1 + start_offset   # inclusivo
+        idx_end = n - 1 + end_offset
+        idx_start = n - 1 + start_offset
         if idx_start < 0 or idx_end < 0 or idx_start > idx_end:
             return pd.Series(dtype=float)
         fechas_tramo = fechas_sorted[idx_start:idx_end + 1]
@@ -573,15 +564,16 @@ with safe_tab(tabs[0], "Flujo Agregado"):
             st.warning(f"No hay suficiente historia para {suffix} (se necesitan ≥ 6 meses)")
             return
 
+        # GAP actual (último mes) por ticker
+        gap_actual = dfh[dfh["Fecha"] == last_date].groupby("Ticker")[f"GAP_{suffix}"].first()
+
         comp = pd.DataFrame({
-            "Tramo1_mes_minus_6_a_4": t1,
-            "Tramo2_mes_minus_3_a_2": t2,
-            "Tramo3_ultimo_mes": t3,
+            "T1": t1, "T2": t2, "T3": t3, "GAP_act": gap_actual
         }).fillna(0).reset_index()
-        comp["Total_6M"] = comp["Tramo1_mes_minus_6_a_4"] + comp["Tramo2_mes_minus_3_a_2"] + comp["Tramo3_ultimo_mes"]
-        comp = comp[comp["Total_6M"].abs() > 0]
-        comp["abs_total"] = comp["Total_6M"].abs()
-        comp = comp.nlargest(top_n_anidado, "abs_total").sort_values("Total_6M", ascending=True)
+        comp["Total_6M"] = comp["T1"] + comp["T2"] + comp["T3"]
+        # Mostrar TODOS los tickers que tengan algún movimiento o GAP != 0
+        comp = comp[(comp["Total_6M"].abs() + comp["GAP_act"].abs()) > 0]
+        comp = comp.sort_values("Total_6M", ascending=True)
 
         if len(comp) == 0:
             st.warning(f"Sin movimientos significativos en {suffix}")
@@ -589,50 +581,136 @@ with safe_tab(tabs[0], "Flujo Agregado"):
 
         # Convertir a bps
         mult = 10000.0
+        t1_bps = comp["T1"].values * mult
+        t2_bps = comp["T2"].values * mult
+        t3_bps = comp["T3"].values * mult
+        total_bps = comp["Total_6M"].values * mult
+        gap_bps = comp["GAP_act"].values * mult
+        tickers_list = comp["Ticker"].tolist()
+        n = len(tickers_list)
 
-        # Stacked bar: para cada ticker, 3 segmentos apilados
-        # Plotly maneja bien stacking con valores negativos por separado
+        # Para cada ticker, calcular las posiciones donde poner texto dentro de cada segmento.
+        # Plotly con barmode="relative" apila respetando signo automáticamente.
+        # Pero necesitamos calcular las posiciones (centros) manualmente para los text labels.
+        # Para hacerlo, calculamos el offset acumulado positivo y negativo.
+
+        def _make_text_positions(t1_arr, t2_arr, t3_arr):
+            """Devuelve los centros x donde poner las etiquetas de cada tramo, por ticker."""
+            pos_off = np.zeros(n)
+            neg_off = np.zeros(n)
+            centers = {1: np.zeros(n), 2: np.zeros(n), 3: np.zeros(n)}
+            for tramo_idx, vals in [(1, t1_arr), (2, t2_arr), (3, t3_arr)]:
+                for i in range(n):
+                    v = vals[i]
+                    if v > 0:
+                        centers[tramo_idx][i] = pos_off[i] + v / 2
+                        pos_off[i] += v
+                    elif v < 0:
+                        centers[tramo_idx][i] = neg_off[i] + v / 2
+                        neg_off[i] += v
+                    else:
+                        centers[tramo_idx][i] = 0
+            return centers
+
+        centers = _make_text_positions(t1_bps, t2_bps, t3_bps)
+
         fig_d = go.Figure()
+
+        # Barra Tramo 1
+        text_t1 = [f"{v:+.0f}" if abs(v) >= 12 else "" for v in t1_bps]
         fig_d.add_trace(go.Bar(
-            y=comp["Ticker"], x=comp["Tramo1_mes_minus_6_a_4"] * mult,
-            name="Meses -6 a -4 (primeros 3M)",
+            y=tickers_list, x=t1_bps,
+            name="Tramo 1 (meses -6 a -4)",
             marker_color=color_tramo1,
             orientation="h",
-            hovertemplate="<b>%{y}</b><br>Tramo 1 (meses -6 a -4): %{x:.0f} bps<extra></extra>"
+            text=text_t1,
+            textposition="inside",
+            insidetextanchor="middle",
+            textfont=dict(size=10, color="#1a1a1a"),
+            hovertemplate="<b>%{y}</b><br>Tramo 1: %{x:+.0f} bps<extra></extra>"
         ))
+        # Barra Tramo 2
+        text_t2 = [f"{v:+.0f}" if abs(v) >= 12 else "" for v in t2_bps]
         fig_d.add_trace(go.Bar(
-            y=comp["Ticker"], x=comp["Tramo2_mes_minus_3_a_2"] * mult,
-            name="Meses -3 a -2 (mid)",
+            y=tickers_list, x=t2_bps,
+            name="Tramo 2 (meses -3 a -2)",
             marker_color=color_tramo2,
             orientation="h",
-            hovertemplate="<b>%{y}</b><br>Tramo 2 (meses -3 a -2): %{x:.0f} bps<extra></extra>"
+            text=text_t2,
+            textposition="inside",
+            insidetextanchor="middle",
+            textfont=dict(size=10, color="#1a1a1a"),
+            hovertemplate="<b>%{y}</b><br>Tramo 2: %{x:+.0f} bps<extra></extra>"
         ))
+        # Barra Tramo 3 (último mes - color más oscuro)
+        text_t3 = [f"{v:+.0f}" if abs(v) >= 12 else "" for v in t3_bps]
         fig_d.add_trace(go.Bar(
-            y=comp["Ticker"], x=comp["Tramo3_ultimo_mes"] * mult,
+            y=tickers_list, x=t3_bps,
             name="Último mes",
             marker_color=color_tramo3,
             orientation="h",
-            hovertemplate="<b>%{y}</b><br>Tramo 3 (último mes): %{x:.0f} bps<extra></extra>"
+            text=text_t3,
+            textposition="inside",
+            insidetextanchor="middle",
+            textfont=dict(size=10, color="white"),
+            hovertemplate="<b>%{y}</b><br>Último mes: %{x:+.0f} bps<extra></extra>"
         ))
-        fig_d.add_vline(x=0, line_color="black", line_width=0.8)
+
+        # Etiqueta total al final de cada barra (annotations)
+        # Posición: al extremo positivo o negativo según signo del total
+        max_abs = max(np.abs(t1_bps + t2_bps + t3_bps).max(),
+                      np.abs(np.minimum(0, t1_bps) + np.minimum(0, t2_bps) + np.minimum(0, t3_bps)).max(),
+                      np.abs(np.maximum(0, t1_bps) + np.maximum(0, t2_bps) + np.maximum(0, t3_bps)).max(),
+                      abs(total_bps).max())
+
+        # Calcular extremos reales (max positivo y max negativo) por ticker
+        pos_ext = np.maximum(0, t1_bps) + np.maximum(0, t2_bps) + np.maximum(0, t3_bps)
+        neg_ext = np.minimum(0, t1_bps) + np.minimum(0, t2_bps) + np.minimum(0, t3_bps)
+
+        offset_x = max_abs * 0.04  # offset para que la etiqueta no toque la barra
+
+        for i in range(n):
+            tot = total_bps[i]
+            # Posición x del texto del total
+            if tot >= 0:
+                x_tot = pos_ext[i] + offset_x
+                anchor_tot = "left"
+            else:
+                x_tot = neg_ext[i] - offset_x
+                anchor_tot = "right"
+            fig_d.add_annotation(
+                x=x_tot, y=tickers_list[i],
+                text=f"<b>{tot:+.0f}</b>",
+                showarrow=False,
+                xanchor=anchor_tot, yanchor="middle",
+                font=dict(size=11, color="#1f4e8f", family="Arial Black"),
+            )
+
+        fig_d.add_vline(x=0, line_color="black", line_width=1)
         fig_d.update_layout(
             template="plotly_white",
-            title=f"{suffix} — Descomposición del flujo 6M en 3 tramos (los 3 suman al total 6M)",
-            barmode="relative",   # stack pero respeta signos
-            height=max(450, 28 * len(comp)),
-            xaxis_title=f"Flujo {suffix} (bps de ΔGAP)",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            title=f"{suffix} — ΔGAP: descomposición del flujo 6M en 3 tramos no solapados",
+            barmode="relative",
+            height=max(500, 26 * n),
+            xaxis_title=f"ΔGAP {suffix} (bps) — los 3 tramos suman exactamente el total 6M",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            margin=dict(l=80, r=180, t=80, b=60),
         )
+        # Ampliar rango x para que entren las etiquetas del total
+        all_x = np.concatenate([t1_bps, t2_bps, t3_bps, pos_ext, neg_ext, total_bps])
+        x_min, x_max = float(all_x.min()), float(all_x.max())
+        x_pad = (x_max - x_min) * 0.18
+        fig_d.update_xaxes(range=[x_min - x_pad, x_max + x_pad])
+
         st.plotly_chart(fig_d, use_container_width=True)
 
-        # Tabla resumen interpretativa
-        comp_tbl = comp[["Ticker", "Tramo1_mes_minus_6_a_4", "Tramo2_mes_minus_3_a_2",
-                         "Tramo3_ultimo_mes", "Total_6M"]].copy()
-        comp_tbl.columns = ["Ticker", "Tramo 1 (M-6 a M-4)", "Tramo 2 (M-3 a M-2)", "Último mes", "Total 6M"]
-        # Convertir a bps
-        for c in comp_tbl.columns[1:]:
+        # Tabla resumen con GAP actual destacado
+        comp_tbl = comp[["Ticker", "T1", "T2", "T3", "Total_6M", "GAP_act"]].copy()
+        comp_tbl.columns = ["Ticker", "Tramo 1 (M-6 a M-4)", "Tramo 2 (M-3 a M-2)",
+                            "Último mes", "Total 6M", "GAP actual"]
+        for c in ["Tramo 1 (M-6 a M-4)", "Tramo 2 (M-3 a M-2)", "Último mes", "Total 6M", "GAP actual"]:
             comp_tbl[c] = (comp_tbl[c] * 10000).round(0).astype(int)
-        # Diagnóstico de tendencia
+
         def _diagnostico(r):
             t1_pos = r["Tramo 1 (M-6 a M-4)"] > 0
             t2_pos = r["Tramo 2 (M-3 a M-2)"] > 0
@@ -646,10 +724,25 @@ with safe_tab(tabs[0], "Flujo Agregado"):
             if not t1_pos and t3_pos:
                 return "↗️ Era venta, ahora compra"
             return "↔️ Mixto"
-        comp_tbl["Tendencia"] = comp_tbl.apply(_diagnostico, axis=1)
-        st.dataframe(comp_tbl, use_container_width=True, hide_index=True)
 
-    # Colores para los 3 tramos (de claro a oscuro = del pasado al presente)
+        def _posicion(g):
+            if g > 5:
+                return "🟢 OW"
+            if g < -5:
+                return "🔴 UW"
+            return "⚪ Neutro"
+
+        comp_tbl["Tendencia"] = comp_tbl.apply(_diagnostico, axis=1)
+        comp_tbl["Posicion"] = comp_tbl["GAP actual"].apply(_posicion)
+        # Ordenar por Total 6M descendente
+        comp_tbl = comp_tbl.sort_values("Total 6M", ascending=False)
+        # Reordenar columnas
+        comp_tbl = comp_tbl[["Ticker", "Tramo 1 (M-6 a M-4)", "Tramo 2 (M-3 a M-2)",
+                             "Último mes", "Total 6M", "Tendencia",
+                             "Posicion", "GAP actual"]]
+        st.dataframe(comp_tbl, use_container_width=True, hide_index=True, height=480)
+
+    # Colores azules: claro → medio → oscuro
     if universo == "AFP":
         _render_descomposicion("AFP", "#a5c4e6", "#5b8fd1", "#1f4e8f")
     elif universo == "FFMM":
@@ -665,9 +758,8 @@ with safe_tab(tabs[0], "Flujo Agregado"):
 
     st.info(
         "📌 **Cómo leer**: las 3 barras de cada papel **suman exactamente el flujo total de 6 meses**. "
-        "Si los 3 tramos van en la misma dirección y de tamaño similar → flujo sostenido y parejo. "
-        "Si el último mes (color más oscuro) tiene signo opuesto a los primeros tramos → cambio de tendencia. "
-        "La columna **Tendencia** de la tabla resume cada caso."
+        "Cifras dentro de cada segmento = bps de ese tramo. Cifra al final (negrita) = total 6M. "
+        "En la tabla: la columna **Tendencia** clasifica el comportamiento y **Posicion** indica si las AFP/FFMM están actualmente OW (🟢) o UW (🔴) en el papel."
     )
 
     with st.expander("📘 Cómo leer esta tab"):
