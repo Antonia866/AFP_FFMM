@@ -530,134 +530,144 @@ with safe_tab(tabs[0], "Flujo Agregado"):
     )
     st.plotly_chart(fig_yr, use_container_width=True)
 
-    # ===== Gráfico 4: Flujo anidado por ticker (6M / 3M / 1M) =====
-    st.markdown("### 🎯 Flujo acumulado por ticker — 6M / 3M / 1M")
+    # ===== Gráfico 4: Descomposición del flujo 6M en 3 tramos no solapados =====
+    st.markdown("### 🎯 Descomposición del flujo 6M — ¿de dónde viene el movimiento?")
     st.caption(
-        "Para cada papel: barra ancha clara = acumulado 6 meses, barra angosta oscura = acumulado 3 meses, "
-        "diamante rojo = último mes. Permite ver el **ritmo del flujo**: si la barra 3M ocupa casi todo el 6M, "
-        "el movimiento se aceleró recientemente; si es chica, el flujo se está enfriando."
+        "Para cada papel, el flujo acumulado de 6 meses se descompone en **3 tramos no solapados que suman exactamente el total**: "
+        "primeros 3 meses del semestre (meses -6 a -4), siguientes 2 meses (meses -3 a -2), y último mes (mes 0). "
+        "Si los 3 tramos van en el mismo sentido y son parejos → flujo sostenido. "
+        "Si tienen signos opuestos → cambio de tendencia. "
+        "Solo se usa ΔGAP (rebalanceo vs IPSA) porque es la métrica limpia — el ΔMMUSD mezcla flujo y efecto precio."
     )
 
-    col_a, col_b = st.columns([1, 2])
-    with col_a:
-        metric_anidado = st.radio(
-            "Métrica",
-            options=["ΔGAP (rebalanceo vs IPSA)", "ΔMMUSD (flujo en dólares)"],
-            index=0,
-            key="anidado_metric"
-        )
-    with col_b:
-        top_n_anidado = st.slider("Top N tickers (por magnitud 6M)", 5, 30, 15, key="anidado_topn")
+    top_n_anidado = st.slider("Top N tickers (por magnitud 6M)", 5, 30, 15, key="anidado_topn")
 
-    # Calcular las 3 ventanas por ticker
     fechas_sorted = sorted(dfh["Fecha"].unique())
 
-    def _sum_window_by_ticker(suffix, months, use_mmusd=False):
-        """Suma de los últimos `months` periodos por ticker, para AFP o FFMM."""
-        if len(fechas_sorted) < months + 1:
+    def _sum_tramo_by_ticker(suffix, start_offset, end_offset):
+        """
+        Suma de Delta_GAP por ticker en el tramo definido por [start_offset, end_offset]
+        donde offset = 0 es el último mes, -1 el anterior, etc.
+        Devuelve la suma de ΔGAP en ese tramo (sin solapamiento con otros tramos).
+        """
+        n = len(fechas_sorted)
+        # Convertir offsets en índices absolutos
+        idx_end = n - 1 + end_offset       # inclusivo
+        idx_start = n - 1 + start_offset   # inclusivo
+        if idx_start < 0 or idx_end < 0 or idx_start > idx_end:
             return pd.Series(dtype=float)
-        fecha_inicio = fechas_sorted[-months - 1]  # excluye el periodo base
-        sub = dfh[dfh["Fecha"] > fecha_inicio].copy()
-        if use_mmusd:
-            # ΔMMUSD por ticker en la ventana = stock al final - stock al inicio
-            stock_end = sub[sub["Fecha"] == fechas_sorted[-1]].groupby("Ticker")[f"MMUSD_{suffix}"].sum()
-            stock_start_idx = max(0, len(fechas_sorted) - months - 1)
-            stock_start = dfh[dfh["Fecha"] == fechas_sorted[stock_start_idx]].groupby("Ticker")[f"MMUSD_{suffix}"].sum()
-            return (stock_end - stock_start).fillna(0)
-        else:
-            return sub.groupby("Ticker")[f"Delta_GAP_{suffix}"].sum()
+        fechas_tramo = fechas_sorted[idx_start:idx_end + 1]
+        sub = dfh[dfh["Fecha"].isin(fechas_tramo)]
+        return sub.groupby("Ticker")[f"Delta_GAP_{suffix}"].sum()
 
-    def _render_anidado(suffix, color_fondo, color_oscuro):
-        use_mm = "MMUSD" in metric_anidado
-        f6 = _sum_window_by_ticker(suffix, 6, use_mm)
-        f3 = _sum_window_by_ticker(suffix, 3, use_mm)
-        f1 = _sum_window_by_ticker(suffix, 1, use_mm)
+    def _render_descomposicion(suffix, color_tramo1, color_tramo2, color_tramo3):
+        # Tramo 1: meses -5 a -3 (los primeros 3 meses del semestre)
+        # Tramo 2: meses -2 a -1 (los 2 meses anteriores al último)
+        # Tramo 3: mes 0 (último mes)
+        # Total = Tramo1 + Tramo2 + Tramo3 = Flujo_6M completo
+        t1 = _sum_tramo_by_ticker(suffix, -5, -3)
+        t2 = _sum_tramo_by_ticker(suffix, -2, -1)
+        t3 = _sum_tramo_by_ticker(suffix, 0, 0)
 
-        if len(f6) == 0:
-            st.warning(f"No hay datos suficientes para {suffix}")
+        if len(t1) == 0 or len(t2) == 0 or len(t3) == 0:
+            st.warning(f"No hay suficiente historia para {suffix} (se necesitan ≥ 6 meses)")
             return
 
-        comp = pd.DataFrame({"Flujo_6M": f6, "Flujo_3M": f3, "Flujo_1M": f1}).fillna(0).reset_index()
-        # Filtrar tickers con cero en todas las ventanas
-        comp = comp[(comp["Flujo_6M"].abs() + comp["Flujo_3M"].abs() + comp["Flujo_1M"].abs()) > 0]
-        comp["abs_6m"] = comp["Flujo_6M"].abs()
-        comp = comp.nlargest(top_n_anidado, "abs_6m").sort_values("Flujo_6M", ascending=True)
+        comp = pd.DataFrame({
+            "Tramo1_mes_minus_6_a_4": t1,
+            "Tramo2_mes_minus_3_a_2": t2,
+            "Tramo3_ultimo_mes": t3,
+        }).fillna(0).reset_index()
+        comp["Total_6M"] = comp["Tramo1_mes_minus_6_a_4"] + comp["Tramo2_mes_minus_3_a_2"] + comp["Tramo3_ultimo_mes"]
+        comp = comp[comp["Total_6M"].abs() > 0]
+        comp["abs_total"] = comp["Total_6M"].abs()
+        comp = comp.nlargest(top_n_anidado, "abs_total").sort_values("Total_6M", ascending=True)
 
         if len(comp) == 0:
             st.warning(f"Sin movimientos significativos en {suffix}")
             return
 
-        # Escala a bps si es ΔGAP, MMUSD nativo si no
-        if use_mm:
-            mult = 1.0
-            x_label = f"Flujo {suffix} acumulado (MMUSD)"
-            x_fmt = ",.0f"
-        else:
-            mult = 10000.0
-            x_label = f"Flujo {suffix} acumulado (bps de ΔGAP)"
-            x_fmt = ".0f"
+        # Convertir a bps
+        mult = 10000.0
 
-        # Color fondo con transparencia (rgba)
-        # Pasar hex a rgba con alpha 0.35
-        def hex_to_rgba(hex_color, alpha):
-            h = hex_color.lstrip("#")
-            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-            return f"rgba({r},{g},{b},{alpha})"
-
-        fig_a = go.Figure()
-        # Barra ancha 6M (fondo)
-        fig_a.add_trace(go.Bar(
-            y=comp["Ticker"], x=comp["Flujo_6M"] * mult,
-            name="Acum 6M",
-            marker_color=hex_to_rgba(color_oscuro, 0.30),
-            marker_line=dict(color=color_oscuro, width=1),
-            orientation="h", width=0.85,
-            hovertemplate="<b>%{y}</b><br>Acum 6M: %{x:" + x_fmt + "}<extra></extra>"
+        # Stacked bar: para cada ticker, 3 segmentos apilados
+        # Plotly maneja bien stacking con valores negativos por separado
+        fig_d = go.Figure()
+        fig_d.add_trace(go.Bar(
+            y=comp["Ticker"], x=comp["Tramo1_mes_minus_6_a_4"] * mult,
+            name="Meses -6 a -4 (primeros 3M)",
+            marker_color=color_tramo1,
+            orientation="h",
+            hovertemplate="<b>%{y}</b><br>Tramo 1 (meses -6 a -4): %{x:.0f} bps<extra></extra>"
         ))
-        # Barra angosta 3M (medio)
-        fig_a.add_trace(go.Bar(
-            y=comp["Ticker"], x=comp["Flujo_3M"] * mult,
-            name="Acum 3M",
-            marker_color=color_oscuro,
-            orientation="h", width=0.45,
-            hovertemplate="<b>%{y}</b><br>Acum 3M: %{x:" + x_fmt + "}<extra></extra>"
+        fig_d.add_trace(go.Bar(
+            y=comp["Ticker"], x=comp["Tramo2_mes_minus_3_a_2"] * mult,
+            name="Meses -3 a -2 (mid)",
+            marker_color=color_tramo2,
+            orientation="h",
+            hovertemplate="<b>%{y}</b><br>Tramo 2 (meses -3 a -2): %{x:.0f} bps<extra></extra>"
         ))
-        # Diamantes 1M
-        fig_a.add_trace(go.Scatter(
-            y=comp["Ticker"], x=comp["Flujo_1M"] * mult,
-            mode="markers", name="Último mes",
-            marker=dict(size=13, color="#e74c3c", symbol="diamond",
-                        line=dict(width=1.5, color="white")),
-            hovertemplate="<b>%{y}</b><br>Último mes: %{x:" + x_fmt + "}<extra></extra>"
+        fig_d.add_trace(go.Bar(
+            y=comp["Ticker"], x=comp["Tramo3_ultimo_mes"] * mult,
+            name="Último mes",
+            marker_color=color_tramo3,
+            orientation="h",
+            hovertemplate="<b>%{y}</b><br>Tramo 3 (último mes): %{x:.0f} bps<extra></extra>"
         ))
-        fig_a.add_vline(x=0, line_color="black", line_width=0.8)
-        fig_a.update_layout(
+        fig_d.add_vline(x=0, line_color="black", line_width=0.8)
+        fig_d.update_layout(
             template="plotly_white",
-            title=f"{suffix} — Flujo acumulado anidado (6M / 3M / 1M)",
-            barmode="overlay",
+            title=f"{suffix} — Descomposición del flujo 6M en 3 tramos (los 3 suman al total 6M)",
+            barmode="relative",   # stack pero respeta signos
             height=max(450, 28 * len(comp)),
-            xaxis_title=x_label,
+            xaxis_title=f"Flujo {suffix} (bps de ΔGAP)",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
-        st.plotly_chart(fig_a, use_container_width=True)
+        st.plotly_chart(fig_d, use_container_width=True)
 
+        # Tabla resumen interpretativa
+        comp_tbl = comp[["Ticker", "Tramo1_mes_minus_6_a_4", "Tramo2_mes_minus_3_a_2",
+                         "Tramo3_ultimo_mes", "Total_6M"]].copy()
+        comp_tbl.columns = ["Ticker", "Tramo 1 (M-6 a M-4)", "Tramo 2 (M-3 a M-2)", "Último mes", "Total 6M"]
+        # Convertir a bps
+        for c in comp_tbl.columns[1:]:
+            comp_tbl[c] = (comp_tbl[c] * 10000).round(0).astype(int)
+        # Diagnóstico de tendencia
+        def _diagnostico(r):
+            t1_pos = r["Tramo 1 (M-6 a M-4)"] > 0
+            t2_pos = r["Tramo 2 (M-3 a M-2)"] > 0
+            t3_pos = r["Último mes"] > 0
+            if t1_pos and t2_pos and t3_pos:
+                return "🟢 Compra sostenida"
+            if not t1_pos and not t2_pos and not t3_pos:
+                return "🔴 Venta sostenida"
+            if t1_pos and not t3_pos:
+                return "⚠️ Era compra, ahora vende"
+            if not t1_pos and t3_pos:
+                return "↗️ Era venta, ahora compra"
+            return "↔️ Mixto"
+        comp_tbl["Tendencia"] = comp_tbl.apply(_diagnostico, axis=1)
+        st.dataframe(comp_tbl, use_container_width=True, hide_index=True)
+
+    # Colores para los 3 tramos (de claro a oscuro = del pasado al presente)
     if universo == "AFP":
-        _render_anidado("AFP", "#5b8fd1", "#1f4e8f")
+        _render_descomposicion("AFP", "#a5c4e6", "#5b8fd1", "#1f4e8f")
     elif universo == "FFMM":
-        _render_anidado("FFMM", "#5dade2", "#1b4f72")
+        _render_descomposicion("FFMM", "#aed6f1", "#5dade2", "#1b4f72")
     else:
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("#### AFP")
-            _render_anidado("AFP", "#5b8fd1", "#1f4e8f")
+            _render_descomposicion("AFP", "#a5c4e6", "#5b8fd1", "#1f4e8f")
         with col2:
             st.markdown("#### FFMM")
-            _render_anidado("FFMM", "#5dade2", "#1b4f72")
+            _render_descomposicion("FFMM", "#aed6f1", "#5dade2", "#1b4f72")
 
     st.info(
-        "📌 **Cómo leer**: si la barra 3M (oscura) ocupa casi todo el 6M (claro) → el flujo se concentró en los últimos 3 meses (movimiento reciente). "
-        "Si la barra 3M es chica vs la 6M → el flujo viene desde antes y se enfrió. "
-        "Si el diamante 1M está en signo opuesto al 3M → cambio de tendencia este mes."
+        "📌 **Cómo leer**: las 3 barras de cada papel **suman exactamente el flujo total de 6 meses**. "
+        "Si los 3 tramos van en la misma dirección y de tamaño similar → flujo sostenido y parejo. "
+        "Si el último mes (color más oscuro) tiene signo opuesto a los primeros tramos → cambio de tendencia. "
+        "La columna **Tendencia** de la tabla resume cada caso."
     )
 
     with st.expander("📘 Cómo leer esta tab"):
