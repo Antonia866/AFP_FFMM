@@ -571,9 +571,11 @@ with safe_tab(tabs[0], "Flujo Agregado"):
             "T1": t1, "T2": t2, "T3": t3, "GAP_act": gap_actual
         }).fillna(0).reset_index()
         comp["Total_6M"] = comp["T1"] + comp["T2"] + comp["T3"]
-        # Mostrar TODOS los tickers que tengan algún movimiento o GAP != 0
+        # Filtrar tickers sin movimiento ni GAP, y quedarse con top 20 por magnitud 6M
         comp = comp[(comp["Total_6M"].abs() + comp["GAP_act"].abs()) > 0]
-        comp = comp.sort_values("Total_6M", ascending=True)
+        comp["abs_total"] = comp["Total_6M"].abs()
+        comp = comp.nlargest(20, "abs_total").sort_values("Total_6M", ascending=True)
+        comp = comp.drop(columns=["abs_total"])
 
         if len(comp) == 0:
             st.warning(f"Sin movimientos significativos en {suffix}")
